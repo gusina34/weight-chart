@@ -1,13 +1,12 @@
-
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Мой Прогресс Веса</title>
-    <!-- Подключаем Telegram WebApp API и библиотеку графиков Chart.js -->
-    <script src="https://telegram.org"></script>
-    <script src="https://jsdelivr.net"></script>
+    <!-- Telegram WebApp API и библиотека графиков Chart.js -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -21,7 +20,7 @@
         }
         h2 {
             font-size: 20px;
-            margin-bottom: 8px;
+            margin-bottom: 12px;
             text-align: center;
         }
         .container {
@@ -33,110 +32,205 @@
             box-sizing: border-box;
             box-shadow: 0 4px 12px rgba(0,0,0,0.05);
         }
-        #loading {
-            font-size: 16px;
-            color: #8e8e93;
-            margin-top: 50px;
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            width: 100%;
+            max-width: 500px;
+            margin-bottom: 12px;
         }
-        #no-data {
-            display: none;
+        .stat {
+            background: var(--tg-theme-secondary-bg-color, #f4f4f5);
+            border-radius: 12px;
+            padding: 10px 6px;
             text-align: center;
-            color: #8e8e93;
+        }
+        .stat-value {
+            font-size: 18px;
+            font-weight: 600;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: var(--tg-theme-hint-color, #8e8e93);
+            margin-top: 2px;
+        }
+        .message {
+            font-size: 16px;
+            color: var(--tg-theme-hint-color, #8e8e93);
+            text-align: center;
             margin-top: 40px;
         }
+        button {
+            margin-top: 16px;
+            padding: 10px 20px;
+            border: 0;
+            border-radius: 10px;
+            font-size: 15px;
+            background: var(--tg-theme-button-color, #3182ce);
+            color: var(--tg-theme-button-text-color, #ffffff);
+        }
+        [hidden] { display: none !important; }
     </style>
 </head>
 <body>
 
-    <h2 id="title">Твой прогресс веса, {{ first_name }}</h2>
-    
-    <div id="loading">Загрузка данных графика...</div>
-    <div id="no-data">Упс! Данных для твоего аккаунта пока нет. Сделай первый замер в боте! ⚖️</div>
+    <h2 id="title">Твой прогресс веса</h2>
 
-    <div class="container" id="chart-container" style="display: none;">
+    <div id="loading" class="message">Загрузка данных графика...</div>
+    <div id="no-data" class="message" hidden>Упс! Данных для твоего аккаунта пока нет. Сделай первый замер в боте! ⚖️</div>
+    <div id="error" class="message" hidden>
+        <div id="error-text">Ошибка при загрузке данных 😢</div>
+        <button id="retry">Попробовать снова</button>
+    </div>
+
+    <div class="stats" id="stats" hidden>
+        <div class="stat"><div class="stat-value" id="stat-start"></div><div class="stat-label">Старт</div></div>
+        <div class="stat"><div class="stat-value" id="stat-current"></div><div class="stat-label">Сейчас</div></div>
+        <div class="stat"><div class="stat-value" id="stat-diff"></div><div class="stat-label">Изменение</div></div>
+    </div>
+
+    <div class="container" id="chart-container" hidden>
         <canvas id="weightChart"></canvas>
     </div>
 
     <script>
-        // Инициализируем Telegram WebApp
-        const tg = window.Telegram.WebApp;
-        tg.expand(); // Разворачиваем окно на максимум
-
-        // ВСТАВЬ СЮДА СВОЮ ССЫЛКУ ИЗ ШАГА 1 👇
+        // Ссылка на веб-приложение Google Apps Script (см. README)
         const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxV3fo7dZMGqh0MyrH16QLnQI1zXgTrQkDecZoYyFYnD1MKASfa1-zKaTgOV3J1ak7Q/exec';
 
-        // Получаем ID пользователя из Telegram
-        const user = tg.initDataUnsafe?.user;
-        const tgId = user ? user.id.toString() : "123456789"; // Если тест в браузере, подставит фейк ID
-        const firstName = user ? user.first_name : "Спортсмен";
+        const $ = id => document.getElementById(id);
 
-        document.getElementById('title').innerText = `Прогресс веса: ${firstName}`;
+        function showOnly(id) {
+            ['loading', 'no-data', 'error', 'stats', 'chart-container'].forEach(el => { $(el).hidden = true; });
+            [].concat(id).forEach(el => { $(el).hidden = false; });
+        }
 
-        // Запрос данных из Google Таблицы
-        fetch(GOOGLE_SCRIPT_URL)
-            .then(response => response.json())
-            .then(data => {
-                // Фильтруем строки по Telegram ID текущего пользователя
-                const userEntries = data.filter(row => row.telegram_id.toString() === tgId);
+        function showError(text) {
+            $('error-text').innerText = text;
+            showOnly('error');
+        }
 
-                document.getElementById('loading').style.display = 'none';
+        // Скрипт Telegram не загрузился или страница открыта не из бота
+        const tg = window.Telegram && window.Telegram.WebApp;
+        const user = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+        if (tg) {
+            tg.ready();
+            tg.expand();
+        }
 
-                if (userEntries.length === 0) {
-                    document.getElementById('no-data').style.display = 'block';
-                    return;
-                }
+        // "72,5" из Google Таблицы → 72.5
+        function parseWeight(value) {
+            return parseFloat(String(value).replace(',', '.'));
+        }
 
-                // Сортируем замеры по дате (от старых к новым)
-                userEntries.sort((a, b) => new Date(a.date) - new Date(b.date));
+        // Поддерживаем ISO-даты и формат "05.10.2026"
+        function parseDate(value) {
+            const m = String(value).match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+            if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+            return new Date(value);
+        }
 
-                // Форматируем данные для графика
-                const labels = userEntries.map(row => {
-                    const date = new Date(row.date);
-                    return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-                });
-                const weights = userEntries.map(row => parseFloat(row.weight));
+        function formatKg(value) {
+            return value.toLocaleString('ru-RU', { maximumFractionDigits: 1 });
+        }
 
-                // Отображаем контейнер с графиком
-                document.getElementById('chart-container').style.display = 'block';
+        let chart;
 
-                // Настройки цветов в зависимости от темы Telegram
-                const lineColor = tg.themeParams.button_color || '#3182ce';
-                const textColor = tg.themeParams.text_color || '#2d3748';
+        function render(entries) {
+            const labels = entries.map(e => e.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }));
+            const weights = entries.map(e => e.weight);
 
-                // Строим график
-                const ctx = document.getElementById('weightChart').getContext('2d');
-                new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: 'Вес (кг)',
-                            data: weights,
-                            borderColor: lineColor,
-                            backgroundColor: lineColor + '22', // Полупрозрачная заливка под линией
-                            borderWidth: 3,
-                            tension: 0.3, // Сглаживание линии
-                            pointRadius: 5,
-                            pointBackgroundColor: lineColor
-                        }]
+            const start = weights[0];
+            const current = weights[weights.length - 1];
+            const diff = current - start;
+            $('stat-start').innerText = formatKg(start);
+            $('stat-current').innerText = formatKg(current);
+            $('stat-diff').innerText = (diff > 0 ? '+' : '') + formatKg(diff);
+
+            showOnly(['stats', 'chart-container']);
+
+            // Цвета из темы Telegram
+            const theme = (tg && tg.themeParams) || {};
+            const lineColor = theme.button_color || '#3182ce';
+            const textColor = theme.text_color || '#2d3748';
+            const gridColor = (theme.hint_color || '#8e8e93') + '33';
+
+            if (chart) chart.destroy();
+            chart = new Chart($('weightChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Вес (кг)',
+                        data: weights,
+                        borderColor: lineColor,
+                        backgroundColor: lineColor + '22', // Полупрозрачная заливка под линией
+                        fill: true,
+                        borderWidth: 3,
+                        tension: 0.3, // Сглаживание линии
+                        pointRadius: 5,
+                        pointBackgroundColor: lineColor
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false }, // Прячем легенду, и так понятно
+                        tooltip: { callbacks: { label: ctx => formatKg(ctx.parsed.y) + ' кг' } }
                     },
-                    options: {
-                        responsive: true,
-                        plugins: {
-                            legend: { display: false } // Прячем легенду, и так понятно
-                        },
-                        scales: {
-                            x: { ticks: { color: textColor } },
-                            y: { ticks: { color: textColor } }
-                        }
+                    scales: {
+                        x: { ticks: { color: textColor }, grid: { color: gridColor } },
+                        y: { ticks: { color: textColor }, grid: { color: gridColor } }
                     }
-                });
-            })
-            .catch(error => {
-                console.error('Ошибка загрузки данных:', error);
-                document.getElementById('loading').innerText = 'Ошибка при загрузке данных 😢';
+                }
             });
+        }
+
+        function load() {
+            if (!user) {
+                showError('Открой эту страницу через кнопку в боте 🤖');
+                return;
+            }
+            if (typeof Chart === 'undefined') {
+                showError('Не удалось загрузить график. Проверь интернет 📶');
+                return;
+            }
+
+            showOnly('loading');
+
+            // Передаём initData, чтобы скрипт вернул только данные этого пользователя
+            const url = GOOGLE_SCRIPT_URL + '?initData=' + encodeURIComponent(tg.initData);
+
+            fetch(url)
+                .then(response => {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.json();
+                })
+                .then(data => {
+                    if (!Array.isArray(data)) throw new Error(data && data.error || 'Неверный ответ');
+
+                    const tgId = String(user.id);
+                    const entries = data
+                        .filter(row => String(row.telegram_id) === tgId)
+                        .map(row => ({ date: parseDate(row.date), weight: parseWeight(row.weight) }))
+                        .filter(e => !isNaN(e.date) && !isNaN(e.weight))
+                        .sort((a, b) => a.date - b.date);
+
+                    if (entries.length === 0) {
+                        showOnly('no-data');
+                        return;
+                    }
+                    render(entries);
+                })
+                .catch(error => {
+                    console.error('Ошибка загрузки данных:', error);
+                    showError('Ошибка при загрузке данных 😢');
+                });
+        }
+
+        if (user) $('title').innerText = `Прогресс веса: ${user.first_name}`;
+        $('retry').addEventListener('click', load);
+        load();
     </script>
 </body>
 </html>
-
